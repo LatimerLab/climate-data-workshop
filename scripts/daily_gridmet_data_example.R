@@ -76,14 +76,15 @@ names(r)[1:9]
 plss_grid <- st_read(paste0(PLSS_DIR, "/plss_grid.gpkg"))
 
 # Check out some random set of grid cells 
-ggplot(plss_grid[1:2000,]) + geom_sf()
+ggplot(plss_grid[1:2000,]) + geom_sf() + theme_minimal()
 
 head(plss_grid)
 
 # Scenario 1: we have a few specific TRS grid cells in mind to look at. 
 # Subset this grid -- for now using some arbitrary locations 
 plss_grid_subset = plss_grid |> dplyr::filter(MTRS %in% c("MDM-T15N-R10E-15", "MDM-T18N-R12E-15", "MDM-T20N-R10E-15", "MDM-T22N-R15E-15"))
-ggplot(plss_grid_subset) + geom_sf()
+
+ggplot(plss_grid_subset) + geom_sf() + theme_minimal()
 
 # Scenario 2: We could also subset the grid based on a region like a single seed zone. 
 
@@ -105,22 +106,22 @@ view_crs(3309)
 seed_zones = st_transform(seed_zones, st_crs(plss_grid))
 
 # Take a look at one or more seed zones 
-seed_zones |> 
-  filter(SEED_ZONE == "531") |> 
-  ggplot() + geom_sf()
+seed_zone_531 <- seed_zones |> 
+  filter(SEED_ZONE == 531)
+ggplot(seed_zone_531) + geom_sf() + theme_minimal()
 
 # Now grab the PLSS grid cells that intersect with this seed zone
-plss_grid_subset = st_intersection(plss_grid, seed_zones[seed_zones$SEED_ZONE == 531,])
-ggplot(plss_grid_subset) + geom_sf()
+plss_grid_subset = st_intersection(plss_grid, seed_zone_531)
+ggplot(plss_grid_subset) + geom_sf() + theme_minimal()
 
 # Get the centroids of our subset of TRS grid squares
-focal_centroids = plss_grid_subset |> st_centroid()
+seed_zone_531_plss_centroids = plss_grid_subset |> st_centroid()
 
 # Reproject the centroids to the CRS of the climate data 
-focal_centroids = st_transform(focal_centroids, st_crs(r))
+seed_zone_531_plss_centroids = st_transform(seed_zone_531_plss_centroids, st_crs(r))
 
 # Extract the value of the climate raster at the centroid of the PLSS grid
-extracted = terra::extract(r, focal_centroids, method = "bilinear")
+extracted = terra::extract(r, seed_zone_531_plss_centroids, method = "bilinear")
 
 # Add the site/grid information to the extracted data to keep it all together
 d = cbind(focal_centroids, extracted)
