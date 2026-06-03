@@ -14,6 +14,8 @@ library(spdep)
 library(tidyverse)
 library(ncf)
 library(brms)
+library(patchwork)
+library(tidybayes)
 
 #### 1) Set up data ####
 
@@ -22,9 +24,26 @@ library(brms)
 #   to avoid having to change the name for new data 
 
 data(meuse) # data on soils analysis near Meuse River in Netherlands
+
+head(meuse)
+
+# Quick plots of the data 
+
 meuse_sf = st_as_sf(meuse, coords = c("x", "y"), crs = 28992, agr = "constant")
 
-dat_sf = meuse_sf
+# Soil zinc concentrations vs distance to river 
+ggplot(meuse_sf, aes(size = zinc, color = elev)) + 
+  geom_sf() + 
+  theme_bw() + 
+  scale_colour_viridis_c()
+
+cor(meuse_sf$zinc, meuse_sf$elev)
+
+# The rest of the script uses "dat" as the data frame to analyze, and dat_sf 
+    # as the spatial points object. Set those values here. 
+dat_sf = meuse_sf 
+
+# Convert spatial object back to non-spatial data frame
 dat = dat_sf |> 
   as.data.frame() |> 
   select(-geometry)
@@ -40,26 +59,24 @@ dat = dat[complete.cases(dat), ]
 
 # Fit the gam model 
 m <- gam(log(zinc) ~ s(elev) + landuse, data = dat) 
+summary(m)
+plot(m)
+
+# Diagnostic plots 
+gam.check(m)
 
 # Get the model residuals and add to data frame 
 dat$resid <- residuals(m, type = "response") 
-      # Or could use type = "response" to get on response scale
-
-# Give coordinates to "dat" as a spatial object
-coordinates(dat) <- ~x + y  # Note this data set uses x and y in meters E&N
-
 
 #### 3) Visualize model residuals and make empirical variogram ####
-
-# Visualize / map residuals by size and color
-dat_df <- as.data.frame(dat)
-dat_df$resid <- resid(m)
-ggplot(dat_df, aes(x = x, y = y, size = abs(resid), color = resid > 0)) +
+ggplot(dat, aes(x = x, y = y, size = abs(resid), color = resid > 0)) +
   geom_point(alpha = 0.6) +
   scale_color_manual(values = c("red", "blue"),
-                     labels = c("Negative", "Positive"))
+                     labels = c("Negative", "Positive")) + 
+  theme_bw()
 
 # Make an empirical variogram 
+coordinates(dat) <- c("x", "y") # need to put spatial info back in... 
 vgm_emp <- variogram(resid ~ 1, data = dat)
 vgm_emp
 plot(vgm_emp)
@@ -71,53 +88,82 @@ moran.correl <- correlog(
   x         = dat_df$x,
   y         = dat_df$y,
   z         = dat_df$resid,
-  increment = 100,    # bin width in data coordinate units (meters for Meuse)
+  increment = 200,    # bin width in data coordinate units (meters for Meuse)
   resamp    = 999    # reps for permutation test
 )
 
 plot(moran.correl) # Filled points are significantly different from zero 
                     # based on permutation test. 
 
+
+
+
 #### 5) Fit a Gaussian process spatial model to the residuals ####
 
-resids_model_brm <- brm(resid ~ gp(x, y, scale = FALSE), 
-                        data = dat_df, 
+zinc_model_brm <- brm(scale(zinc) ~ scale(elev) + gp(x, y, scale = FALSE), 
+                        data = dat, 
                         chains = 4, 
                         cores = 4)
 
-summary(resids_model_brm)
-plot(resids_model_brm)
+summary(zinc_model_brm)
+plot(zinc_model_brm)
 # sdgp parameter is the spatial variance (larger means more important)
 # lscale parameter is the approximate spatial range of the 
 #   spatial autocorrelation patterns. 
 #   I think we could use 
 #     these outputs as a measure of the scale of spatial synchrony as well. 
 
-# Visualize the spatial surface by predicting to a grid, then interpolating 
+# Compare to gam of the same thing 
+zinc_model_gam = gam(scale(zinc) ~ scale(elev) + s(x, y, k=10), data = dat)
+summary(zinc_model_gam)
 
-# Make the grid
-grid_resolution <- 20 # Choose how fine to make the grid 
-                        # in fractions of the distance across the 
-                        # current dataset 
-pred_grid <- expand.grid(
-  x = seq(min(dat_df$x), max(dat_df$x), length.out = grid_resolution),
-  y = seq(min(dat_df$y), max(dat_df$y), length.out = grid_resolution)
-)
-# Predict to points in the grid using posterior_epred()
+## Plot mean predictions and uncertainty at the point locations 
 epred_draws <- posterior_epred(
-  resids_model_brm, 
-  newdata = pred_grid, 
+  zinc_model_brm, 
+  newdata = dat, 
   ndraws = 100 # Keep this number pretty small or it gets slow
 )
-pred_grid$mean_estimate <- colMeans(epred_draws)
-pred_grid$sd_estimate   <- apply(epred_draws, 2, sd)
+dat$mean_estimate <- colMeans(epred_draws)
+dat$sd_estimate   <- apply(epred_draws, 2, sd)
 
-# Plot an interpolated surface as a raster 
-ggplot(pred_grid, aes(x=x, y=y, fill = mean_estimate)) + 
-  geom_raster(interpolate = TRUE) + 
-  theme_minimal() + 
-  coord_equal() 
-  
+mean_plot = ggplot(as.data.frame(dat), aes(x=x, y=y, color = mean_estimate)) + 
+  geom_point() + 
+  scale_colour_continuous(palette = "YlOrBr") + 
+  theme_bw()
+sd_plot = ggplot(as.data.frame(dat), aes(x=x, y=y, color = sd_estimate)) + 
+  geom_point() + 
+  scale_colour_continuous(palette = "YlOrBr") + 
+  theme_bw()
+plot(mean_plot + sd_plot)
+
+
+## Let's plot JUST The spatial random effects (i.e. the gaussian process)
+# Create new version of the data with fixed effect set to median (0) 
+dat_gp <- as.data.frame(dat) |> 
+  mutate(elev = 0)
+# Extract posterior distributions for the grid
+gp_epred_draws <- posterior_epred(
+  zinc_model_brm, 
+  newdata = dat_gp, 
+  ndraws = 100
+)
+
+# Calculate the mean spatial effect and its uncertainty (SD)
+dat$gp_mean <- colMeans(gp_epred_draws)
+dat$gp_sd   <- apply(gp_epred_draws, 2, sd)
+
+gp_mean_plot <- ggplot(as.data.frame(dat), aes(x = x, y = y, color = gp_mean)) + 
+  geom_point(size = 2.5) + 
+  scale_color_distiller(palette = "RdBu", name = "GP Mean\nAnomaly") + 
+  theme_bw() +
+  labs(title = "Isolated GP Spatial Effect")
+gp_sd_plot <- ggplot(as.data.frame(dat), aes(x = x, y = y, color = gp_sd)) + 
+  geom_point(size = 2.5) + 
+  scale_color_viridis_c(option = "inferno", name = "GP Posterior\nSD") + 
+  theme_bw() +
+  labs(title = "Uncertainty of GP Spatial Effect")
+plot(gp_mean_plot + gp_sd_plot)
+
 
 #### 6. For fun, include a spatial term in the model, then recheck 
 
@@ -130,6 +176,7 @@ m_spatial <- gam(log(zinc) ~ s(elev, k = 5) + landuse + s(x,y, k = 10), data = d
 #   at k = 5 it's mostly a trend surface, at k = 10 it's hillier 
 
 dat$resid_spatial <- residuals(m_spatial, type = "response") 
+
 moran.correl_spatial <- correlog(
   x         = dat$x,
   y         = dat$y,
@@ -138,7 +185,9 @@ moran.correl_spatial <- correlog(
   resamp    = 999    # reps for permutation test
 )
 plot(moran.correl_spatial) # autocorrelation is gone with k = 10 
-summary(m_spatial) # elev still matters a lot but is linear now 
-plot(moran.correl)
+summary(m_spatial) # elev still matters a lot
+plot(m_spatial)
+
+gam.check(m_spatial)
 
 # Compare the same thing using brms? 
