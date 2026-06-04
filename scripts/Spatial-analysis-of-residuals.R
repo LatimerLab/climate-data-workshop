@@ -114,8 +114,30 @@ plot(zinc_model_brm)
 #     these outputs as a measure of the scale of spatial synchrony as well. 
 
 # Compare to gam of the same thing 
-zinc_model_gam = gam(scale(zinc) ~ scale(elev) + s(x, y, k=10), data = dat)
+
+dat = as.data.frame(dat) |> 
+  mutate(zinc_scaled = scale(zinc),
+         elev_scaled = scale(elev))
+
+zinc_model_gam = gam(zinc_scaled ~ elev_scaled + s(x, y, k=10), data = dat)
 summary(zinc_model_gam)
+
+gam_terms <- predict(zinc_model_gam, newdata = dat, type = "terms")
+dat$gam_spatial_effect <- gam_terms[, "s(x,y)"]
+gam_se_terms <- predict(zinc_model_gam, newdata = dat, type = "terms", se.fit = TRUE)
+dat$gam_spatial_se <- gam_se_terms$se.fit[, "s(x,y)"]
+gam_mean_plot <- ggplot(as.data.frame(dat), aes(x = x, y = y, color = gam_spatial_effect)) + 
+  geom_point(size = 2.5) + 
+  scale_color_distiller(palette = "RdBu", name = "GAM Smooth\nEffect") + 
+  theme_bw() +
+  labs(title = "Isolated GAM s(x,y) Effect")
+gam_se_plot <- ggplot(as.data.frame(dat), aes(x = x, y = y, color = gam_spatial_se)) + 
+  geom_point(size = 2.5) + 
+  scale_color_viridis_c(option = "inferno", name = "GAM Spatial\nSE") + 
+  theme_bw() +labs(title = "GAM Spatial Effect Uncertainty")
+plot(gam_mean_plot + gam_se_plot)  
+
+
 
 ## Plot mean predictions and uncertainty at the point locations 
 epred_draws <- posterior_epred(
@@ -129,11 +151,13 @@ dat$sd_estimate   <- apply(epred_draws, 2, sd)
 mean_plot = ggplot(as.data.frame(dat), aes(x=x, y=y, color = mean_estimate)) + 
   geom_point() + 
   scale_colour_continuous(palette = "YlOrBr") + 
-  theme_bw()
+  theme_bw() + 
+  labs(title = "Model predictions")
 sd_plot = ggplot(as.data.frame(dat), aes(x=x, y=y, color = sd_estimate)) + 
   geom_point() + 
   scale_colour_continuous(palette = "YlOrBr") + 
-  theme_bw()
+  theme_bw() + 
+  labs(title = "Standard deviation of Model predictions")
 plot(mean_plot + sd_plot)
 
 
@@ -149,7 +173,7 @@ gp_epred_draws <- posterior_epred(
 )
 
 # Calculate the mean spatial effect and its uncertainty (SD)
-dat$gp_mean <- colMeans(gp_epred_draws)
+dat$gp_mean <- scale(colMeans(gp_epred_draws), center = TRUE, scale= FALSE)
 dat$gp_sd   <- apply(gp_epred_draws, 2, sd)
 
 gp_mean_plot <- ggplot(as.data.frame(dat), aes(x = x, y = y, color = gp_mean)) + 
